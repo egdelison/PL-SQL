@@ -1,0 +1,802 @@
+CREATE OR REPLACE TRIGGER TASY.UC_CONSISTIR_CONTA_PACIENTE
+    BEFORE UPDATE ON TASY.CONTA_PACIENTE FOR EACH ROW
+DECLARE
+
+    ie_consiste_alta_w      varchar2(1);
+    ie_consiste_exam_pend   varchar2(1);
+    qt_exames_w             NUMBER;
+    ds_prescricoes_w        varchar2(1000);
+    ds_texto_aviso_w        varchar2(1000);
+    nr_seq_proc_w procedimento_paciente.nr_sequencia%type;
+    cd_procedimento_w procedimento_paciente.cd_procedimento%type;
+    ie_origem_proced_w procedimento_paciente.ie_origem_proced%type; 
+    dt_proced_w             DATE;
+    dt_procedimento_w       DATE;
+    dt_procduplo_w          DATE;
+    dt_entrada_w            DATE;
+    dt_conta_w              DATE;
+    seq_w                   NUMBER;
+    dt_alta_w               DATE;
+    nr_sequencia_w          NUMBER;
+    nr_seq_duplo_w          NUMBER;
+    qt_proced_w             NUMBER (8) := 0;
+    qt_tmp_min_w            NUMBER (8);
+    qt_registro_w           NUMBER (10);
+    qt_controle_w           NUMBER (10) := 0;
+    dt_controle_w           DATE;
+    qt_controle_consulta_w  NUMBER;
+    dt_controle_consulta_w  DATE;
+    nr_seq_proc_consulta_w  NUMBER;
+    cd_proced_controle_w    NUMBER;
+    nr_seq_consulta_w       NUMBER;
+    ie_controle_w           NUMBER (1);
+    nr_endereco_w           NUMBER;
+    cd_pessoa_fisica_w      NUMBER := 0;
+    nr_atend_w              NUMBER;
+    nr_interno_conta_w      NUMBER;
+    dt_mes_ano_ref_w        DATE;
+    total_pac_w             NUMBER;
+    total_proc_w            NUMBER;
+    total_pac_pend_w        NUMBER;
+    total_proc_pend_w       NUMBER;
+    cd_autorizacao_w        VARCHAR2(2000);
+    qt_guia_w               NUMBER := 0;
+    ds_texto_w              VARCHAR(2000);
+    ds_texto2_w             VARCHAR(2000);
+    hr_internacao_w         NUMBER;
+    qt_diarias_w            NUMBER;
+
+PRAGMA AUTONOMOUS_TRANSACTION;
+
+CURSOR C00 IS
+        SELECT nr_sequencia, cd_procedimento, ie_origem_proced FROM procedimento_paciente WHERE nr_interno_conta = :new.nr_interno_conta AND qt_procedimento > 1 AND cd_motivo_exc_conta IS NULL;
+        
+CURSOR C01 IS
+        SELECT nr_sequencia
+          FROM procedimento_paciente
+         WHERE     cd_procedimento = 10101039
+               AND nr_atendimento = :new.nr_atendimento
+               AND nr_interno_conta = :new.nr_interno_conta
+               AND nr_sequencia NOT IN nr_seq_proc_consulta_w
+               AND cd_motivo_exc_conta IS NULL;
+
+CURSOR C02 IS
+      SELECT nr_sequencia, cd_procedimento, qt, dt_procedimento
+        FROM (  SELECT x.nr_sequencia,
+                       x.cd_procedimento,
+                       x.dt_procedimento,
+                       (SELECT qt
+                          FROM (  SELECT SUM(qt_procedimento)     qt
+                                    FROM PROCEDIMENTO_PACIENTE
+                                   WHERE     nr_atendimento =
+                                             :new.NR_ATENDIMENTO
+                                         AND nr_interno_conta =
+                                             :new.nr_interno_conta
+                                         AND cd_procedimento =
+                                             x.cd_procedimento
+                                GROUP BY cd_procedimento)
+                         WHERE qt >= 1)    qt
+                  FROM PROCEDIMENTO_PACIENTE x
+                 WHERE     x.nr_atendimento = :new.NR_ATENDIMENTO
+                       AND x.nr_interno_conta = :new.nr_interno_conta
+              ORDER BY x.cd_procedimento, x.nr_sequencia)
+       WHERE qt >= 1 AND cd_procedimento <> 10101039
+    ORDER BY 2, 1;
+    
+    CURSOR C03 IS
+        SELECT cd_procedimento,dt_conta
+          FROM ( SELECT cd_procedimento, COUNT(cd_procedimento) qt, dt_conta
+                   FROM procedimento_paciente
+                  WHERE     nr_interno_conta = :new.nr_interno_conta
+                    AND cd_motivo_exc_conta IS NULL
+                    AND qt_procedimento > 0
+                  GROUP BY cd_procedimento, dt_conta) 
+         WHERE qt > 1;
+
+    CURSOR C04 IS
+        SELECT nr_sequencia, dt_conta, ROWNUM seq
+          FROM procedimento_paciente
+         WHERE nr_interno_conta = :new.nr_interno_conta
+           AND cd_motivo_exc_conta IS NULL
+           AND cd_procedimento IN (cd_procedimento_w)
+           AND qt_procedimento > 0
+           AND dt_conta = dt_conta_w
+      ORDER BY nr_sequencia;
+
+BEGIN
+ 
+    IF (:new.cd_convenio_parametro = 2 
+        AND obter_funcao_ativa IN (67,1116)
+        AND :new.ie_status_acerto = 2 
+        AND :old.ie_status_acerto = 1 
+        AND :new.dt_atualizacao >= sysdate) THEN
+        
+        /* início das funções para o desdobramento da conta quando a quantidade é maior que 1 */
+        
+        OPEN C00;
+
+           LOOP
+                FETCH C00
+                INTO nr_seq_proc_w,cd_procedimento_w,ie_origem_proced_w;
+         
+                    IF (obter_grupo_procedimento(cd_procedimento_w,ie_origem_proced_w,'C') NOT IN (92010000,8060027,8060034,8060022,98020000,91010000) AND cd_procedimento_w <> 10104020) THEN
+                       
+                        UC_GERAR_DESDOBRAMENTO_PROC_CONTA(nr_seq_proc_w,'Tasy');
+               
+                    END IF;
+                     
+                EXIT WHEN c00%NOTFOUND;      
+
+            END LOOP;
+        
+        CLOSE C00;
+        
+        /* Fim das funções para o desdobramento da conta quando a quantidade é maior que 1 */
+        
+        /* Início da função para atualizar as datas de procedimentos com as datas iguais quando não é P.A */
+
+        IF :new.ie_tipo_atend_conta <> 3 AND :new.cd_convenio_parametro = 2 THEN
+        
+            OPEN C03;
+            
+                LOOP
+                
+                    FETCH C03 INTO cd_procedimento_w, dt_conta_w;
+                    
+                        IF cd_procedimento_w > 0 THEN
+                        
+                            OPEN C04;
+
+                               LOOP
+                                    FETCH C04
+                                    INTO nr_seq_duplo_w,dt_procduplo_w, seq_w;
+                             
+                                        IF nr_seq_duplo_w > 0 THEN
+                                       
+                                            dt_procduplo_w := dt_procduplo_w + seq_w/86400;
+                                            
+                                            uc_atualiza_data_duplic_proc(nr_seq_duplo_w,0,0,0,null,0,null,dt_procduplo_w,0,0,null,'DATADUPLICADA');                                      
+                                        
+                                        END IF;
+                                       
+                                    EXIT WHEN c04%NOTFOUND;
+                                    
+                                END LOOP;
+    --                        
+                            CLOSE C04;                       
+                            
+                        END IF;
+                        
+                    EXIT WHEN c03%NOTFOUND;
+            
+                END LOOP;
+
+            CLOSE C03;
+            
+        END IF;            
+                
+    /* Verifica se a data de alta está posterior a data da consulta do desfecho*/
+    
+           IF (obter_funcao_ativa IN (67,1116) AND :old.ie_tipo_atend_conta = 3 AND :old.cd_convenio_parametro = 2) THEN
+        
+            SELECT *
+              INTO ie_consiste_alta_w
+              FROM (SELECT 'S'
+                      FROM procedimento_paciente a, conta_paciente b
+                     WHERE     a.cd_procedimento = 10101039
+                           AND a.nr_atendimento = :new.nr_atendimento
+                           AND a.nr_interno_conta = :new.nr_interno_conta
+                           AND a.nr_interno_conta = b.nr_interno_conta
+                           AND obter_tipo_atendimento (a.nr_atendimento) = 3
+                           AND a.dt_procedimento > obter_data_alta_atend (a.nr_atendimento)
+                           AND b.ie_status_acerto = 1
+                           AND a.nr_sequencia =
+                               (SELECT x.nr_sequencia
+                                  FROM procedimento_paciente x
+                                 WHERE     x.nr_interno_conta = a.nr_interno_conta
+                                       AND x.nr_atendimento = a.nr_atendimento
+                                       AND x.cd_procedimento = a.cd_procedimento
+                                       AND x.dt_procedimento =
+                                           (SELECT MAX (y.dt_procedimento)
+                                              FROM procedimento_paciente y
+                                             WHERE     y.cd_procedimento = a.cd_procedimento
+                                                   AND y.nr_interno_conta = a.nr_interno_conta
+                                                   AND y.nr_atendimento = a.nr_atendimento)
+                                       AND x.cd_medico_executor = uc_obter_medico_desfecho ( :new.nr_atendimento))
+                           AND OBTER_FUNCAO_ATIVA IN (67,1116))
+                     UNION ALL
+                    SELECT 'N' FROM DUAL
+                    FETCH FIRST 1 ROW ONLY;
+
+                IF(ie_consiste_alta_w = 'S') THEN
+                    Raise_application_error(-20011,'O procedimento "10101039 - Em Pronto Socorro" está com data posterior a data de alta. Favor conferir se a data de alta está correta ou corrigir a data do procedimento para o fechamento correto da conta!');
+                END IF;
+                
+            END IF;
+        
+        /* Início das funções para atualizar a data dos procedimentos duplicados */ 
+        SELECT DISTINCT 1
+          INTO ie_controle_w
+          FROM (  SELECT DISTINCT x.cd_procedimento,(SELECT qt
+                                                       FROM (  SELECT COUNT (cd_procedimento) qt
+                                                                 FROM PROCEDIMENTO_PACIENTE
+                                                                WHERE     nr_atendimento = :new.NR_ATENDIMENTO
+                                                                  AND nr_interno_conta = :new.nr_interno_conta
+                                                                  AND cd_procedimento = x.cd_procedimento
+                                                             GROUP BY cd_procedimento)
+                                                      WHERE qt >= 1) qt
+                            FROM PROCEDIMENTO_PACIENTE x
+                           WHERE x.nr_atendimento   = :new.NR_ATENDIMENTO
+                             AND x.nr_interno_conta = :new.nr_interno_conta
+                        ORDER BY x.cd_procedimento, x.nr_sequencia)
+         WHERE qt >= 1
+         UNION ALL
+           SELECT 0 FROM DUAL  -- for Oracle
+           FETCH FIRST 1 ROW ONLY;
+         
+        IF (:old.ie_tipo_atend_conta   = 3
+       AND :old.cd_convenio_parametro  = 2
+       AND ie_controle_w               = 1) THEN
+
+            SELECT dt_procedimento, a.nr_sequencia
+              INTO dt_proced_w, nr_seq_proc_consulta_w
+              FROM procedimento_paciente a
+             WHERE     a.cd_procedimento = 10101039
+                   AND a.nr_atendimento = :new.nr_atendimento
+                   AND a.nr_interno_conta = :new.nr_interno_conta
+                   AND a.nr_sequencia =
+                       (SELECT x.nr_sequencia
+                          FROM procedimento_paciente x
+                         WHERE     x.nr_interno_conta = a.nr_interno_conta
+                               AND x.nr_atendimento = a.nr_atendimento
+                               AND x.cd_procedimento = a.cd_procedimento
+                               AND x.dt_procedimento =
+                                   (SELECT MAX (y.dt_procedimento)
+                                      FROM procedimento_paciente y
+                                     WHERE     y.cd_procedimento =
+                                               a.cd_procedimento
+                                           AND y.nr_interno_conta =
+                                               a.nr_interno_conta
+                                           AND y.nr_atendimento =
+                                               a.nr_atendimento ) 
+                               AND x.cd_medico_executor = uc_obter_medico_desfecho(:new.nr_atendimento))
+            UNION ALL
+           SELECT NULL,NULL FROM DUAL  -- for Oracle
+           FETCH FIRST 1 ROW ONLY;
+           
+           IF dt_proced_w IS NULL THEN
+           
+               SELECT dt_procedimento, a.nr_sequencia
+                 INTO dt_proced_w, nr_seq_proc_consulta_w
+                 FROM procedimento_paciente a
+                WHERE     a.cd_procedimento = 10101039
+                      AND a.nr_interno_conta = :new.nr_interno_conta
+                      AND a.nr_atendimento = :new.nr_atendimento
+                      AND a.cd_motivo_exc_conta IS NULL
+                      AND a.nr_sequencia = (SELECT MIN(x.nr_sequencia) FROM procedimento_paciente x WHERE x.cd_procedimento = 10101039 AND x.nr_interno_conta = :new.nr_interno_conta AND x.nr_atendimento = :new.nr_atendimento)
+                      UNION ALL
+               SELECT NULL,NULL FROM DUAL  -- for Oracle
+               FETCH FIRST 1 ROW ONLY;
+           
+           END IF;
+
+            SELECT DISTINCT obter_data_alta_atend (nr_atendimento)
+              INTO dt_alta_w
+              FROM procedimento_paciente
+             WHERE     nr_atendimento = :new.nr_atendimento
+                   AND nr_interno_conta = :new.nr_interno_conta;
+
+            SELECT COUNT (*)
+              INTO qt_proced_w
+              FROM procedimento_paciente
+             WHERE     cd_procedimento = 10101039
+                   AND nr_atendimento = :new.nr_atendimento
+                   AND nr_interno_conta = :new.nr_interno_conta
+                   AND cd_motivo_exc_conta IS NULL;
+
+            dt_controle_w := dt_proced_w;
+          
+        IF (ie_controle_w = 1 AND dt_proced_w IS NULL) THEN        
+             
+            SELECT dt_entrada
+              INTO dt_entrada_w
+              FROM atendimento_paciente
+             WHERE nr_atendimento = :new.nr_atendimento;
+        
+            OPEN C02;
+            
+                LOOP
+                
+                    FETCH C02 INTO nr_sequencia_w,cd_proced_controle_w,qt_registro_w,dt_procedimento_w;
+                    
+                        uc_atualiza_data_duplic_proc(0,0,:new.nr_interno_conta,0,null,0,dt_entrada_w,null,0,0,null,'MATERIALALTA');
+                    
+                        uc_atualiza_data_duplic_proc(nr_sequencia_w,0,:new.nr_interno_conta,0,null,0,null,dt_procedimento_w,0,0,null,'PROCGERAL');
+                    
+                    EXIT WHEN C02%NOTFOUND;
+                    
+                END LOOP;
+                
+            CLOSE C02;
+            
+        ELSIF (ie_controle_w = 1 AND TRUNC (dt_alta_w) = TRUNC (dt_proced_w)) THEN --Atualiza a data do início da consulta do desfecho com a data do procedimento(desfecho) e a data final é a data da alta do paciente.
+            
+            IF nr_seq_proc_consulta_w > 0 THEN
+            
+                uc_atualiza_data_duplic_proc(0,10101039,:new.nr_interno_conta,nr_seq_proc_consulta_w,null,0,dt_alta_w,dt_proced_w,0,0,null,'CONSULTADESFECHO');
+              
+            END IF;
+
+            IF qt_proced_w > 1 THEN -- Se tiver mais de uma consulta
+                
+                qt_controle_consulta_w := 1;
+
+                OPEN C01;
+
+                    LOOP
+                        -- Busca as consultas de pedidos de parecer
+                        FETCH C01 INTO nr_seq_consulta_w;
+                        
+                            IF qt_controle_consulta_w < qt_proced_w THEN
+                            
+                                qt_tmp_min_w := obter_dif_data (dt_proced_w,dt_alta_w,'TM')/ qt_proced_w; -- Diferença entre a data de desfecho e a data de alta.
+                                dt_controle_consulta_w := dt_proced_w + (  (qt_tmp_min_w / 1440) * qt_controle_consulta_w);
+                                
+                                uc_atualiza_data_duplic_proc(0,10101039,:new.nr_interno_conta,0,dt_controle_consulta_w,0,dt_alta_w,null,nr_seq_consulta_w,0,null,'CONSULTAPARECER');                                
+                            
+                                qt_controle_consulta_w         := qt_controle_consulta_w + 1;
+                                
+                            END IF;
+                            
+                        EXIT WHEN C01%NOTFOUND;
+                        
+                    END LOOP;
+
+                CLOSE C01;
+                
+            END IF;
+
+            OPEN C02;
+            
+                LOOP
+                
+                    FETCH C02 INTO nr_sequencia_w,cd_proced_controle_w,qt_registro_w,dt_procedimento_w;
+
+                    EXIT WHEN C02%NOTFOUND;
+                    
+                    qt_tmp_min_w := obter_dif_data (dt_proced_w,dt_alta_w,'TM') / qt_registro_w;
+                    qt_controle_w := qt_controle_w + 1;
+    
+                    IF (qt_controle_w = 1 AND qt_registro_w = 1) THEN
+                    
+                        uc_atualiza_data_duplic_proc(nr_sequencia_w,0,0,0,null,0,dt_alta_w,null,0,cd_proced_controle_w,null,'PROCEDIMENTOALTA');
+                 
+                        uc_atualiza_data_duplic_proc(0,0,:new.nr_interno_conta,0,null,0,dt_alta_w,null,0,0,null,'MATERIALALTA');
+        
+                        qt_controle_w := 0;
+                        dt_controle_w := dt_proced_w;
+                        
+                    ELSIF (qt_controle_w = 1 AND qt_registro_w > 1) THEN
+                                        
+                        uc_atualiza_data_duplic_proc(nr_sequencia_w,0,0,0,null,0,null,dt_proced_w,0,cd_proced_controle_w,null,'PROCEDIMENTODATA');
+                        
+                        uc_atualiza_data_duplic_proc(0,0,0,:new.nr_interno_conta,null,0,dt_proced_w,null,0,0,null,'MATERIALDATA');        
+
+                    ELSIF (qt_controle_w = qt_registro_w) THEN                    
+                    
+                        uc_atualiza_data_duplic_proc(nr_sequencia_w,0,0,0,null,0,dt_alta_w,null,0,cd_proced_controle_w,null,'PROCEDIMENTOALTA');
+                        
+                        uc_atualiza_data_duplic_proc(0,0,0,:new.nr_interno_conta,null,0,dt_alta_w,null,0,0,null,'MATERIALALTA');                    
+
+                        IF (qt_controle_w = qt_registro_w) THEN
+                        
+                            qt_controle_w := 0;
+                            dt_controle_w := dt_proced_w;
+                            
+                        END IF;
+                        
+                    ELSIF (qt_controle_w > 1 AND qt_controle_w <= qt_registro_w) THEN
+
+                        dt_controle_w := dt_controle_w + qt_tmp_min_w / 1440;
+                        
+                        uc_atualiza_data_duplic_proc(nr_sequencia_w,0,0,0,null,0,null,dt_controle_w,0,cd_proced_controle_w,null,'PROCEDIMENTOCONTROLE');
+                        
+                        uc_atualiza_data_duplic_proc(0,0,0,:new.nr_interno_conta,null,0,dt_alta_w,null,0,0,null,'MATERIALALTA');
+
+                    END IF;
+                    
+                END LOOP;
+            
+            CLOSE C02;
+        ELSIF (ie_controle_w = 1 AND TRUNC (dt_alta_w) <> TRUNC (dt_proced_w)) THEN
+               
+            IF nr_seq_proc_consulta_w > 0 THEN            
+            
+                uc_atualiza_data_duplic_proc(0,10101039,:new.nr_interno_conta,nr_seq_proc_consulta_w,null,0,TO_DATE (TRUNC (dt_proced_w) || ' 23:59:59','dd/mm/rrrr hh24:mi:ss'),dt_proced_w,0,0,null,'CONSULTADESFECHO');       
+                   
+            END IF;
+                            
+                qt_controle_consulta_w := 1;
+
+                OPEN C01;
+
+                    LOOP
+                        -- Busca as consultas de pedidos de parecer
+                        FETCH C01 INTO nr_seq_consulta_w;
+                        
+                            IF qt_controle_consulta_w < qt_proced_w THEN
+                            
+                                qt_tmp_min_w := obter_dif_data (dt_proced_w,TO_DATE (TRUNC (dt_proced_w) || ' 23:59:59','dd/mm/rrrr hh24:mi:ss'),'TM') / qt_proced_w; -- Diferença entre a data de desfecho e a data de alta.
+                                dt_controle_consulta_w := dt_proced_w + (  (qt_tmp_min_w / 1440) * qt_controle_consulta_w);
+ 
+                                uc_atualiza_data_duplic_proc(0,10101039,:new.nr_interno_conta,0,dt_controle_consulta_w,0,TO_DATE (TRUNC (dt_proced_w) || ' 23:59:59','dd/mm/rrrr hh24:mi:ss'),null,nr_seq_consulta_w,0,null,'CONSULTAPARECER');                            
+
+                                qt_controle_consulta_w := qt_controle_consulta_w + 1;
+                                
+                            END IF;
+                            
+                       EXIT WHEN C01%NOTFOUND;
+                       
+                    END LOOP;
+
+                CLOSE C01;
+                
+                OPEN C02;
+
+                    LOOP
+                        FETCH C02 INTO nr_sequencia_w,cd_proced_controle_w,qt_registro_w,dt_procedimento_w;
+                        
+                            qt_tmp_min_w := obter_dif_data (dt_proced_w,fim_dia (dt_proced_w),'TM') / qt_registro_w;
+                            qt_controle_w := qt_controle_w + 1;
+
+                            IF (qt_controle_w = 1 AND qt_registro_w = 1) THEN                                
+                            
+                                uc_atualiza_data_duplic_proc(nr_sequencia_w,cd_proced_controle_w,0,nr_seq_proc_consulta_w,null,0,null,TO_DATE (TRUNC (dt_proced_w)|| ' 23:59:59','dd/mm/rrrr hh24:mi:ss'),0,0,null,'PROCEDIMENTONAOCONSULTA');
+                        
+                                uc_atualiza_data_duplic_proc(0,0,:new.nr_interno_conta,0,null,0,null,TO_DATE (TRUNC (dt_proced_w)|| ' 23:59:59','dd/mm/rrrr hh24:mi:ss'),0,0,null,'MATERIALDATA');
+                                
+                                qt_controle_w := 0;
+                                dt_controle_w := dt_proced_w;
+                                
+                            ELSIF (qt_controle_w = 1 AND qt_registro_w > 1) THEN
+                                
+                                uc_atualiza_data_duplic_proc(nr_sequencia_w,cd_proced_controle_w,0,nr_seq_proc_consulta_w,null,0,null,dt_proced_w,0,null,null,'PROCEDIMENTONAOCONSULTA');
+                        
+                                uc_atualiza_data_duplic_proc(0,0,:new.nr_interno_conta,0,null,0,null,dt_proced_w,0,0,null,'MATERIALDATA');
+                                 
+                            ELSIF (qt_controle_w > 1 AND qt_controle_w <= qt_registro_w) THEN
+                                
+                                dt_controle_w := dt_controle_w + qt_tmp_min_w / 1440;
+                               
+                                uc_atualiza_data_duplic_proc(nr_sequencia_w,cd_proced_controle_w,0,nr_seq_proc_consulta_w,null,0,null,dt_controle_w,0,0,null,'PROCEDIMENTONAOCONSULTA');
+                        
+                                uc_atualiza_data_duplic_proc(0,0,:new.nr_interno_conta,0,null,0,null,dt_controle_w,0,0,null,'MATERIALDATA');
+
+                                IF (qt_controle_w = qt_registro_w) THEN
+                                
+                                    qt_controle_w := 0;
+                                    dt_controle_w := dt_proced_w;
+                                    
+                                END IF;
+                                
+                            END IF;                           
+                     
+                        EXIT WHEN C02%NOTFOUND;
+                        
+                    END LOOP;
+
+                CLOSE C02;
+        END IF;           
+    
+    END IF;
+    
+END IF;
+
+/* Fim das funções para atualizar a data dos procedimentos duplicados */
+
+/* Início das consistências para não permitir o fechamento da conta paciente quando existirem exames pendentes */
+
+IF (:new.cd_convenio_parametro <> 1 
+    AND obter_funcao_ativa IN (67,1125,1116)
+    AND :new.ie_status_acerto = 2 
+    AND :old.ie_status_acerto = 1) THEN
+    
+    SELECT CASE WHEN ds_prescr IS NOT NULL THEN 'S' ELSE 'N' END AS ie_situacao, ds_prescr 
+      INTO ie_consiste_exam_pend, ds_prescricoes_w
+      FROM (
+     SELECT 'S',LISTAGG(nr_prescricao, ', ') WITHIN GROUP (ORDER BY nr_prescricao) ds_prescr           
+     FROM(
+    SELECT DISTINCT b.nr_prescricao
+      FROM procedimento_paciente a, prescr_procedimento b, atendimento_paciente c, prescr_medica d, conta_paciente e, exame_laboratorio f
+     WHERE a.nr_prescricao = b.nr_prescricao
+       AND a.nr_atendimento = c.nr_atendimento
+       AND b.nr_prescricao = d.nr_prescricao
+       AND e.nr_interno_conta = a.nr_interno_conta
+       AND a.nr_sequencia_prescricao = b.nr_sequencia
+       AND b.nr_seq_exame = f.nr_seq_exame
+       AND b.ie_status_atend IN (10,13)
+       AND d.dt_liberacao IS NOT NULL
+       AND d.dt_suspensao IS NULL
+       AND b.nr_seq_exame IS NOT NULL
+       AND b.dt_suspensao IS NULL
+       AND a.cd_motivo_exc_conta IS NULL
+       AND c.ie_tipo_atendimento = 7
+       AND e.ie_status_acerto = 1
+      AND e.cd_convenio_parametro NOT IN (1,9,12,16,17,20,21,25,28,29,34,35,37,38,39,48,54,55) -- Convênios que não entram na regra
+      AND b.cd_motivo_baixa NOT IN (16)
+      AND a.nr_interno_conta = :new.nr_interno_conta)); 
+    
+    IF(ie_consiste_exam_pend = 'S') THEN
+    
+        SELECT COUNT(*)
+        INTO qt_exames_w
+              FROM procedimento_paciente a, prescr_procedimento b, atendimento_paciente c, prescr_medica d, conta_paciente e, exame_laboratorio f
+             WHERE a.nr_prescricao = b.nr_prescricao
+               AND a.nr_atendimento = c.nr_atendimento
+               AND b.nr_prescricao = d.nr_prescricao
+               AND e.nr_interno_conta = a.nr_interno_conta
+               AND a.nr_sequencia_prescricao = b.nr_sequencia
+               AND b.nr_seq_exame = f.nr_seq_exame
+               AND b.ie_status_atend IN (10,13)
+               AND d.dt_liberacao IS NOT NULL
+               AND d.dt_suspensao IS NULL
+               AND b.nr_seq_exame IS NOT NULL
+               AND b.dt_suspensao IS NULL
+               AND a.cd_motivo_exc_conta IS NULL
+               AND c.ie_tipo_atendimento = 7
+               AND e.ie_status_acerto = 1
+              AND e.cd_convenio_parametro NOT IN (1,9,12,16,17,20,21,25,28,29,34,35,37,38,39,48,54,55) -- Convênios que não entram na regra
+              AND b.cd_motivo_baixa NOT IN (16)
+              AND a.nr_interno_conta = :new.nr_interno_conta;
+    
+        IF qt_exames_w = 1 THEN 
+            ds_texto_aviso_w := 'A seguinte prescrição'; 
+        ELSE 
+            ds_texto_aviso_w := 'As seguintes prescrições'; END IF;
+        
+        Raise_application_error(-20011,ds_texto_aviso_w||' contém exames pendentes, favor verificar:'||chr(10)||chr(10)||'Prescr.: '||ds_prescricoes_w);
+        
+    END IF;
+    
+END IF;-- Fim da inconsistência para bloquear de fechar a conta com exames pendentes
+
+
+-- Início da inconsistência do pacote de Hemodiálise Crônica para o convênio Unimed Criciúma
+-- Esta inconsistência avisa o faturamento quando o pacote de Hemodiálise Crônica está na conta do paciente sem o procedimento Principal
+IF (:new.cd_convenio_parametro = 2
+    AND obter_funcao_ativa IN (67,1125,1116)
+    AND :new.ie_status_acerto = 2 
+    AND :old.ie_status_acerto = 1) THEN
+    
+    SELECT c.nr_atendimento, c.nr_interno_conta,b.dt_mesano_referencia, c.total_pac, c.total_proc, c.total_pac_pend, c.total_proc_pend
+      INTO nr_atend_w, nr_interno_conta_w, dt_mes_ano_ref_w, total_pac_w, total_proc_w, total_pac_pend_w, total_proc_pend_w
+      FROM(
+    SELECT a.nr_atendimento, 
+           a.nr_interno_conta,
+           (SELECT COUNT(*) FROM procedimento_paciente x WHERE x.nr_interno_conta = a.nr_interno_conta AND x.cd_procedimento = 15029034) total_pac,
+           (SELECT COUNT(*) FROM procedimento_paciente x WHERE x.nr_interno_conta = a.nr_interno_conta AND x.cd_procedimento = 30909031) total_proc,
+           (SELECT COUNT(*) FROM procedimento_paciente x WHERE x.nr_atendimento = a.nr_atendimento AND x.cd_procedimento = 15029034 AND x.cd_motivo_exc_conta IS NULL AND x.nr_interno_conta IS NULL) total_pac_pend,
+           (SELECT COUNT(*) FROM procedimento_paciente x WHERE x.nr_atendimento = a.nr_atendimento AND x.cd_procedimento = 30909031 AND x.cd_motivo_exc_conta IS NULL AND x.nr_interno_conta IS NULL) total_proc_pend
+      FROM procedimento_paciente a
+     WHERE a.cd_procedimento IN (15029034)
+       AND a.cd_motivo_exc_conta IS NULL
+       AND a.nr_interno_conta IS NOT NULL
+       GROUP BY a.nr_atendimento, a.nr_interno_conta, a.cd_procedimento
+       ORDER BY a.nr_atendimento, a.nr_interno_conta) c, conta_paciente b 
+       WHERE c.nr_interno_conta = b.nr_interno_conta
+         AND c.nr_interno_conta = :new.nr_interno_conta
+         AND total_pac <> total_proc
+         UNION ALL
+        SELECT 0,0,NULL,0,0,0,0 FROM DUAL
+        FETCH FIRST 1 ROW ONLY;
+        
+        IF nr_atend_w > 0 THEN
+        
+            Raise_application_error(-20011,'Existe Pacote para Hemodiálise Crônica lançado na conta sem o pocedimento 30909031 - Hemodiálise Crônica (Por Sessão).'||CHR(10)||'Por favor verifique!');
+        
+        END IF;
+
+END IF;
+-- Fim da inconsistência do pacote de Hemodiálise Crônica
+
+-- Tratamento quando o cadastro do paciente não tem número de endereço. Apenas para convênio SUS
+IF (:new.cd_convenio_parametro = 48     -- SUS
+    AND obter_funcao_ativa = 1125       -- SUS BPA
+    AND :new.ie_status_acerto = 2       -- Novo status definitivo
+    AND :old.ie_status_acerto = 1) THEN -- Antigo status provisório
+    
+    -- Busca o código de pessoa física do atendimento
+    SELECT cd_pessoa_fisica 
+      INTO cd_pessoa_fisica_w
+      FROM atendimento_paciente 
+     WHERE nr_atendimento = :new.nr_atendimento;    
+  
+    -- Busca o número de endereço principal do paciente
+    SELECT nr_endereco
+      INTO nr_endereco_w
+      FROM compl_pessoa_fisica
+     WHERE ie_tipo_complemento = 1
+       AND cd_pessoa_fisica = cd_pessoa_fisica_w;
+    
+    -- Caso seja nulo, o sistema insere o número 0 (zero) no cadastro, pois o sistema não aceita varchar, ou seja, não aceita S/N
+    IF nr_endereco_w IS NULL THEN
+       UPDATE compl_pessoa_fisica SET nr_endereco = 0 WHERE cd_pessoa_fisica = cd_pessoa_fisica_w;
+       COMMIT;
+    END IF;    
+END IF; -- Fim do tratamento do número de endereço do paciente
+
+-- Inconsistência para verificar guia e senha iguais
+IF (obter_tipo_convenio(:new.cd_convenio_parametro) = 2 -- TIpo de convênio = (Convênio)
+    AND obter_funcao_ativa IN (67,1116) -- Funções: Conta Paciente, Auditoria Conta Paciente
+    AND :new.ie_status_acerto = 2 -- Quando novo status for para Definitivo
+    AND :old.ie_status_acerto = 1) THEN
+    
+        -- Identifica que a conta selecionada possui qualquer guia com a senha igual
+        SELECT LISTAGG(' Guia: '||a.cd_autorizacao||' - Senha: '||a.cd_senha||CHR(10)) WITHIN GROUP (ORDER BY a.cd_autorizacao), count(*)
+          INTO cd_autorizacao_w, qt_guia_w
+          FROM tiss_conta_guia a, conta_paciente b
+         WHERE a.nr_interno_conta = b.nr_interno_conta
+           AND obter_tipo_convenio(a.cd_convenio) = 2 -- Para os convênios do tipo Convênio, excluindo Particular
+           AND a.cd_convenio NOT IN (26) -- Excluindo o convênio Cassi, por enviar o número de guia e senha iguais
+           AND a.cd_autorizacao = a.cd_senha
+           AND a.nr_interno_conta = :new.nr_interno_conta
+           AND a.ie_tiss_tipo_guia <> 6 -- Guia de honorário individual
+           UNION ALL
+            SELECT NULL,0 FROM DUAL
+            FETCH FIRST 1 ROW ONLY;
+        
+        IF qt_guia_w > 1 THEN 
+            ds_texto_w := 'As seguintes guias estão';
+        ELSE 
+            ds_texto_w := 'A seguinte guia está';
+        END IF;
+       
+    IF cd_autorizacao_w IS NOT NULL THEN
+          Raise_application_error(-20011,'Atenção! '||ds_texto_w||' com o mesmo número de guia e senha: '||CHR(10)||CHR(10)||cd_autorizacao_w);
+    END IF;    
+END IF;
+-- Fim da inconsistência para verificar guia e senha iguais
+
+IF (obter_tipo_convenio(:new.cd_convenio_parametro) = 2 -- TIpo de convênio = (Convênio)
+    AND obter_funcao_ativa IN (67,1116) -- Funções: Conta Paciente, Auditoria Conta Paciente
+    AND (:new.ie_status_acerto = 2 -- Quando novo status for para Definitivo
+    AND :old.ie_status_acerto = 1 OR :new.nr_seq_protocolo IS NOT NULL)
+    AND obter_tipo_atendimento(:new.nr_atendimento) IN (1,8) -- Tipo de atendimento Internado
+    /*AND :new.nm_usuario IN ('Elison')*/) THEN  
+    
+    DECLARE
+    
+    qt_tempo_internacao_w   NUMBER;
+    alta_obito_w            NUMBER;
+    
+    BEGIN
+    
+       SELECT obter_hora_entre_datas(:new.dt_periodo_inicial, :new.dt_periodo_final)
+         INTO hr_internacao_w 
+         FROM DUAL;
+    
+        IF :new.cd_convenio_parametro = 2 THEN
+            
+            SELECT 1
+              INTO alta_obito_w
+              FROM atendimento_paciente
+             WHERE nr_atendimento = :new.nr_atendimento AND cd_motivo_alta IN (74, 77)
+            UNION ALL
+            SELECT 0 FROM DUAL
+            FETCH FIRST 1 ROW ONLY;
+            
+         END IF;
+         
+--         Raise_application_error(-20011,hr_internacao_w);
+         
+         CASE WHEN hr_internacao_w < 6 THEN 
+         
+              SELECT NVL(SUM (a.qt_procedimento),0)
+                INTO qt_diarias_w
+                FROM procedimento_paciente a, procedimento b
+               WHERE a.cd_procedimento = b.cd_procedimento
+                 AND a.ie_origem_proced = b.ie_origem_proced
+                 AND b.ie_classificacao = 3
+                 AND a.nr_interno_conta = :new.nr_interno_conta
+                 AND a.cd_motivo_exc_conta IS NULL;
+                 
+            IF qt_diarias_w > 0 THEN
+                    Raise_application_error(-20011,'O período de internação do paciente foi menor que 6 horas!'||CHR(10)||'O tipo de atendimento deve ser Ambulatorial sem cobrança de diárias.'||CHR(10)||'Por favor verifique!');
+                END IF;
+                 
+          WHEN hr_internacao_w BETWEEN 6 AND 12 THEN 
+          
+               SELECT NVL(SUM (a.qt_procedimento),0)
+                    INTO qt_diarias_w
+                    FROM procedimento_paciente a, procedimento b
+                   WHERE a.cd_procedimento = b.cd_procedimento
+                     AND a.ie_origem_proced = b.ie_origem_proced
+                     AND b.ie_classificacao = 3
+                     AND a.nr_interno_conta = :new.nr_interno_conta
+                     AND a.cd_motivo_exc_conta IS NULL;
+                     
+                IF qt_diarias_w > 1 THEN
+                
+                    Raise_application_error(-20011,'O período de internação do paciente foi de 6 a 12 horas, porém existem mais de uma diária na conta. Por favor verifique!');
+                    
+                ELSE       
+              
+                  SELECT NVL(SUM (a.qt_procedimento),0)
+                    INTO qt_diarias_w
+                    FROM procedimento_paciente a
+              INNER JOIN procedimento b
+                      ON a.cd_procedimento = b.cd_procedimento
+                     AND a.ie_origem_proced = b.ie_origem_proced                 
+                     AND b.ie_classificacao = 3
+                     AND Obter_Proc_Interno_Classif(nvl(a.nr_seq_proc_interno,uc_obter_proc_interno_procedimento(b.cd_procedimento))) = 5
+                   WHERE a.nr_interno_conta = :new.nr_interno_conta
+                     AND a.cd_motivo_exc_conta IS NULL;
+              
+                    IF qt_diarias_w <> 1 THEN
+                    
+                        Raise_application_error(-20011,'O período de internação do paciente foi de 6 a 12 horas! Favor, verifique se a diária está como Hospital-dia! ');
+                        
+                    END IF;
+                    
+                END IF;
+                
+              ELSE
+              
+                  SELECT NVL(SUM (a.qt_procedimento),0)
+                    INTO qt_diarias_w
+                    FROM procedimento_paciente a
+              INNER JOIN procedimento b
+                      ON a.cd_procedimento = b.cd_procedimento
+                     AND a.ie_origem_proced = b.ie_origem_proced                 
+                     AND b.ie_classificacao = 3
+                   WHERE a.nr_interno_conta = :new.nr_interno_conta
+                     AND a.cd_motivo_exc_conta IS NULL;
+                                          
+                     qt_tempo_internacao_w := ROUND(hr_internacao_w/24);
+                     
+                     IF alta_obito_w = 1 THEN qt_tempo_internacao_w := qt_tempo_internacao_w + 1; END IF;
+                                          
+                    IF qt_tempo_internacao_w = qt_diarias_w OR qt_diarias_w > qt_tempo_internacao_w OR qt_diarias_w < qt_tempo_internacao_w THEN
+                    
+                          SELECT NVL(SUM (a.qt_procedimento),0)
+                            INTO qt_diarias_w
+                            FROM procedimento_paciente a
+                      INNER JOIN procedimento b
+                              ON a.cd_procedimento = b.cd_procedimento
+                             AND a.ie_origem_proced = b.ie_origem_proced                 
+                             AND b.ie_classificacao = 3
+                             AND Obter_Proc_Interno_Classif(nvl(a.nr_seq_proc_interno,uc_obter_proc_interno_procedimento(b.cd_procedimento))) = 6
+                           WHERE a.nr_interno_conta = :new.nr_interno_conta
+                             AND a.cd_motivo_exc_conta IS NULL
+                             AND NOT EXISTS (SELECT DISTINCT 1 FROM 
+                                                     procedimento_paciente a
+                                          INNER JOIN procedimento b
+                                                  ON a.cd_procedimento = b.cd_procedimento
+                                                 AND a.ie_origem_proced = b.ie_origem_proced                 
+                                                 AND b.ie_classificacao = 3
+                                                 AND Obter_Proc_Interno_Classif(nvl(a.nr_seq_proc_interno,uc_obter_proc_interno_procedimento(b.cd_procedimento))) = 5
+                                               WHERE a.nr_interno_conta = :new.nr_interno_conta
+                                                 AND a.cd_motivo_exc_conta IS NULL);
+                            IF qt_diarias_w = 0 THEN
+                            
+                                Raise_application_error(-20011,'Este atendimento é de internado, porém existem diárias de Hospital-dia, por favor verifique!');
+                                
+                            ELSIF qt_tempo_internacao_w < qt_diarias_w OR qt_tempo_internacao_w > qt_diarias_w THEN
+                            
+                                Raise_application_error(-20012,'Foram indentificadas as seguintes inconsistências. Por favor verifique!'||CHR(10)||'Período de internação: '||qt_tempo_internacao_w||CASE WHEN qt_tempo_internacao_w = 1 THEN ' dia.' ELSE ' dias.' END||CHR(10)||'Diárias na conta: '||qt_diarias_w||'.');
+                                                     
+                            END IF;
+                            
+                    END IF;
+                    
+         END CASE;
+     
+     END;
+    
+END IF;
+
+
+END;
+/
+SHOW ERRORS;
+/
