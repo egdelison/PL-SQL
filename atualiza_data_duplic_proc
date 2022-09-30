@@ -1,0 +1,109 @@
+CREATE OR REPLACE procedure TASY.uc_atualiza_data_duplic_proc(	
+                    nr_sequencia_p	        number := 0,
+					cd_procedimento_p	    number := 0,
+					nr_interno_conta_p      number := 0,
+					nr_seq_proc_consulta_p  number := 0,
+                    dt_controle_consulta_p  date   := null,
+                    qt_controle_consulta_w  number := 0,
+					dt_alta_p               date   := null,
+					dt_proced_p             date   := null,
+					nr_seq_consulta_p       number := 0,
+					cd_proced_controle_p    number := 0,
+					dt_controle_p           date   := null,
+					ie_funcao               varchar2 := null
+					) is
+					
+BEGIN
+
+    IF ie_funcao = 'CONSULTADESFECHO' AND nr_seq_proc_consulta_p > 0 THEN
+
+        UPDATE procedimento_paciente 
+           SET dt_conta                 = dt_alta_p,
+               dt_inicio_procedimento   = dt_proced_p
+         WHERE cd_procedimento          = cd_procedimento_p
+               AND nr_interno_conta     = nr_interno_conta_p
+               AND cd_motivo_exc_conta  IS NULL
+               AND nr_sequencia         = nr_seq_proc_consulta_p;
+               
+    ELSIF ie_funcao = 'CONSULTAPARECER' AND nr_seq_consulta_p > 0 THEN
+
+        UPDATE procedimento_paciente 
+           SET dt_conta                 = dt_alta_p, 
+               dt_inicio_procedimento   = dt_controle_consulta_p
+         WHERE     cd_procedimento      = cd_procedimento_p
+           AND nr_interno_conta         = nr_interno_conta_p
+           AND cd_motivo_exc_conta      IS NULL
+           AND nr_sequencia             = nr_seq_consulta_p;
+           
+    ELSIF ie_funcao = 'PROCEDIMENTOALTA' AND cd_proced_controle_p > 0 AND dt_alta_p IS NOT NULL THEN
+
+        UPDATE procedimento_paciente
+           SET dt_inicio_procedimento   = dt_alta_p,
+               dt_conta                 = dt_alta_p
+         WHERE nr_sequencia             = nr_sequencia_p
+           AND cd_procedimento          = cd_proced_controle_p;
+           
+    ELSIF ie_funcao = 'MATERIALALTA' AND nr_interno_conta_p > 0 AND dt_alta_p IS NOT NULL THEN
+
+        UPDATE material_atend_paciente
+           SET dt_conta                 = dt_alta_p
+         WHERE nr_interno_conta         = nr_interno_conta_p;
+         
+    ELSIF ie_funcao = 'PROCEDIMENTOALTA' AND nr_interno_conta_p > 0 AND dt_alta_p IS NOT NULL THEN
+
+        UPDATE procedimento_paciente
+           SET dt_inicio_procedimento   = dt_alta_p,
+               dt_conta                 = dt_alta_p
+         WHERE nr_interno_conta         = nr_interno_conta_p;
+         
+    ELSIF ie_funcao = 'PROCEDIMENTODATA' AND cd_proced_controle_p > 0 AND dt_proced_p IS NOT NULL THEN
+
+        UPDATE procedimento_paciente
+           SET dt_inicio_procedimento   = dt_proced_p,
+               dt_conta                 = dt_proced_p
+         WHERE nr_sequencia             = nr_sequencia_p
+           AND cd_procedimento          = cd_proced_controle_p;
+           
+    ELSIF ie_funcao = 'MATERIALDATA' AND nr_interno_conta_p > 0 AND dt_proced_p IS NOT NULL THEN
+
+        UPDATE material_atend_paciente
+           SET dt_conta                 = dt_proced_p
+         WHERE nr_interno_conta         = nr_interno_conta_p;
+         
+    ELSIF ie_funcao = 'PROCEDIMENTOCONTROLE' AND cd_proced_controle_p > 0 AND dt_proced_p IS NOT NULL THEN
+
+        UPDATE procedimento_paciente
+           SET dt_inicio_procedimento   = dt_proced_p,
+               dt_conta                 = dt_proced_p
+         WHERE nr_sequencia             = nr_sequencia_p
+           AND cd_procedimento          = cd_proced_controle_p; 
+           
+    ELSIF ie_funcao = 'PROCEDIMENTONAOCONSULTA' AND cd_procedimento_p > 0 AND nr_seq_proc_consulta_p > 0 AND dt_proced_p IS NOT NULL THEN
+
+        UPDATE procedimento_paciente
+           SET dt_inicio_procedimento   = dt_proced_p,
+               dt_conta                 = dt_proced_p
+         WHERE nr_sequencia             = nr_sequencia_p
+           AND cd_procedimento          = cd_procedimento_p
+           AND nr_sequencia            <> nr_seq_proc_consulta_p;
+           
+    ELSIF ie_funcao = 'DATADUPLICADA' AND nr_sequencia_p > 0 AND dt_proced_p IS NOT NULL THEN
+
+        UPDATE procedimento_paciente
+           SET dt_conta                 = dt_proced_p,
+               dt_procedimento          = dt_proced_p
+         WHERE nr_sequencia             = nr_sequencia_p;
+         
+   ELSIF ie_funcao = 'PROCGERAL' AND nr_sequencia_p > 0 AND dt_proced_p IS NOT NULL THEN
+
+        UPDATE procedimento_paciente
+           SET dt_inicio_procedimento   = dt_proced_p,
+               dt_conta                 = dt_proced_p
+         WHERE nr_sequencia             = nr_sequencia_p;
+    
+    END IF;
+
+COMMIT;
+
+END;
+/
