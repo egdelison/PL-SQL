@@ -1,0 +1,55 @@
+CREATE OR REPLACE FUNCTION TASY.uc_se_atend_retorno (cd_pessoa_fisica_p NUMBER, cd_medico_executor_p NUMBER)
+    RETURN NUMBER
+    
+    /****************************************************************************************************************************************
+    |   OS: 535782                                                                                                                          |
+    |   Objetivo: identificar se o atendimento futuro é de retorno ou não para o convênio SC Saúde e Estabelecimento HSJB.                  |
+    |             Para a utilização desta function, deve-se levar em consideração se o atendimento futuro veio de um agendamento ou não     |
+    |             caso não seja de um agendamento, esta fuction não tem funcionalidade                                                      |
+    |                                                                                                                                       |
+    ****************************************************************************************************************************************/
+    
+IS
+    cd_retorno_w        NUMBER := 0;
+    nr_atendimento_w    NUMBER := 0;
+    dt_entrada_w        DATE;
+    qt_dias_w           NUMBER := 0;
+    cd_agenda_w         NUMBER := 0;
+    
+BEGIN
+
+    -- Busca o último agendamento do paciente através da informação do código de paciente e código do médico executor (que é o dono da agenda)
+    SELECT a.cd_agenda
+      INTO cd_agenda_w
+      FROM agenda_consulta a, agenda b
+     WHERE a.cd_agenda = b.cd_agenda AND a.cd_pessoa_fisica = cd_pessoa_fisica_p    -- código de pessoa física do paciente
+       AND TRUNC(a.dt_agenda) = TRUNC(SYSDATE)                                      -- identifica se a data da agenda é a mesma data de hoje
+       AND b.cd_pessoa_fisica = cd_medico_executor_p                                -- código de pessoa física do médico executor
+       AND a.ie_status_agenda <> 'C'                                                -- somente se a agenda não tiver cancelada
+       AND obter_perfil_ativo = 2165;
+
+    -- Busca o último agendamento do paciente com a agenda selecionada no select anterior
+     SELECT a.nr_atendimento, 
+            a.dt_entrada,
+            obter_dias_entre_datas(TRUNC(a.dt_entrada),TRUNC(SYSDATE))
+       INTO nr_atendimento_w, dt_entrada_w, qt_dias_w
+       FROM atendimento_paciente_v a
+      WHERE a.cd_pessoa_fisica = cd_pessoa_fisica_p
+        AND a.nr_seq_queixa = 1                                                     -- apenas o motivo de atendimento Nova Consulta
+        AND a.cd_estabelecimento = 60                                               -- estabelecimento São João Batista
+        AND a.nr_atendimento = (SELECT MAX(x.nr_atendimento)                        -- este sub-select identifica o último atendimento que foi de primeira consulta
+                                      FROM atendimento_paciente_v x 
+                                     WHERE x.cd_pessoa_fisica = a.cd_pessoa_fisica 
+                                       AND x.nr_seq_queixa = 1
+                                       AND TRUNC(x.dt_entrada) < TRUNC(SYSDATE)
+                                       AND uc_obter_agenda_atend_consulta(a.nr_atendimento) = cd_agenda_w
+                               )
+        AND TRUNC(a.dt_entrada) < TRUNC(SYSDATE)
+        AND obter_perfil_ativo = 2165;
+   
+    -- Se o a primeira consulta tiver mais de 30 dias, então o retorno é 0(zero), caso contrário retorna 1(um)
+   CASE WHEN qt_dias_w > 30 THEN cd_retorno_w := 0; ELSE cd_retorno_w := 1; END CASE;
+
+    RETURN cd_retorno_w;
+END;
+/
