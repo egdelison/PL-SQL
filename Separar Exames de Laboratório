@@ -1,0 +1,342 @@
+CREATE OR REPLACE PROCEDURE TASY.uc_separa_exam_pend_lab IS
+
+/*--------------------------------------------------------------------------------------------------------------|
+Usuário de criação: Elison Goulart Duarte                                                                       |
+Função: Conta Paciente                                                                                          |
+Data de criação: 02/03/2023                                                                                     |
+OS: 540944                                                                                                      |
+Objetivo: Separar os exames de laboratório quando os mesmos já estão aprovados dos que não estão aprovados.     |
+                                                                                                                |
+*/--------------------------------------------------------------------------------------------------------------|
+
+BEGIN
+
+DECLARE
+
+nr_interno_conta1_w     NUMBER;
+nr_interno_conta2_w     NUMBER;
+ie_possui_w             VARCHAR2(2);
+nr_sequencia_w          NUMBER;
+qt_conta_w              NUMBER;
+cd_convenio_w           NUMBER;
+nr_atendimento_w        NUMBER;
+nm_usuario_w            VARCHAR2(10) := 'Tasy';
+dt_entrega_w            DATE;
+ds_erro_w               VARCHAR2(255);
+qt_pend_conta1_w        NUMBER;
+qt_aprov_conta1_w       NUMBER;
+qt_pend_conta2_w        NUMBER;
+qt_aprov_conta2_w       NUMBER;
+ie_junta_conta_w        VARCHAR2(1) := 'N';
+ie_status_w             VARCHAR2(1);
+qt_conta_pend_w         NUMBER;
+qt_aprov_w              NUMBER;
+qt_pend_w               NUMBER;
+
+-- Lista todas contas que estão pendentes e que possuem exames aprovados
+CURSOR C00 IS
+SELECT nr_atendimento, nr_interno_conta, cd_convenio/*, qt_pend, qt_aprov */FROM(
+    SELECT a.nr_atendimento,
+           b.nr_interno_conta,
+           a.cd_convenio,           
+           (SELECT COUNT(*) FROM procedimento_paciente x WHERE x.nr_interno_conta = b.nr_interno_conta AND obter_status_atend_seq_prescr (x.nr_prescricao, CASE WHEN x.nr_sequencia_prescricao IS NOT NULL THEN x.nr_sequencia_prescricao ELSE (SELECT x.nr_seq_exame FROM regra_lanc_automatico y WHERE y.nr_sequencia = x.nr_seq_regra_lanc) END) NOT IN (12,35,45)) qt_pend,
+           (SELECT COUNT(*) FROM procedimento_paciente x WHERE x.nr_interno_conta = b.nr_interno_conta AND obter_status_atend_seq_prescr (x.nr_prescricao, CASE WHEN x.nr_sequencia_prescricao IS NOT NULL THEN x.nr_sequencia_prescricao ELSE (SELECT x.nr_seq_exame FROM regra_lanc_automatico y WHERE y.nr_sequencia = x.nr_seq_regra_lanc) END) IN (12,35,45)) qt_aprov
+      FROM atendimento_paciente_v a, conta_paciente b
+     WHERE a.nr_atendimento = b.nr_atendimento
+       AND a.cd_convenio = b.cd_convenio_parametro
+       AND b.ie_cancelamento IS NULL
+       AND b.cd_convenio_parametro IN (54,55)
+       AND b.ie_status_acerto = 1
+       AND b.vl_conta > 0
+       AND TRUNC(a.dt_entrada) >= '01/10/2022'
+     ORDER BY a.dt_entrada) WHERE qt_aprov > 0;
+ 
+-- Lista a sequência dos exames que estão pendentes para que sejam transferidos para outra conta
+CURSOR C01 IS
+    SELECT nr_sequencia
+      FROM (
+                SELECT a.nr_sequencia,
+                       a.nr_atendimento,
+                       a.nr_interno_conta,
+                       a.cd_convenio,
+                       a.nr_prescricao,
+                       CASE WHEN nr_sequencia_prescricao IS NOT NULL THEN nr_sequencia_prescricao ELSE uc_lab_obter_seq_prescr(nr_prescricao,(select x.nr_seq_exame from regra_lanc_automatico x where x.nr_sequencia = a.nr_seq_regra_lanc)) END AS nr_sequencia_prescricao,
+                       a.nr_seq_exame,
+                       (select x.nr_seq_exame from regra_lanc_automatico x where x.nr_sequencia = a.nr_seq_regra_lanc) nr_seq_exam_rla,
+                       a.nr_seq_regra_lanc
+                  FROM procedimento_paciente a, conta_paciente b
+                 WHERE a.nr_interno_conta = b.nr_interno_conta
+                   AND b.cd_convenio_parametro = cd_convenio_w
+                   AND NVL(b.nr_seq_protocolo,0) = 0
+                   AND b.vl_conta > 0
+                   AND b.ie_cancelamento IS NULL
+                   AND a.nr_interno_conta IS NOT NULL                   
+            ) WHERE obter_status_atend_seq_prescr(nr_prescricao, nr_sequencia_prescricao) NOT IN (12,35,45)
+                AND nr_interno_conta = nr_interno_conta1_w;
+
+-- Caso o dia de entrega do protocolo seja hoje, lista todos os atendimentos que estão pendentes, porém com os exames aprovados e altera o status da conta para definitivo
+CURSOR C02 IS
+    SELECT nr_atendimento, nr_interno_conta, qt_pend, qt_aprov
+    FROM
+        (SELECT a.nr_atendimento,
+                a.nr_interno_conta,
+                uc_obter_data_entrega_conv(a.cd_convenio_parametro) dt_entrega,
+               (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) NOT IN (12,35,45)) qt_pend,
+               (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) IN (12,35,45)) qt_aprov                                        
+          FROM conta_paciente a, convenio_regra_entrega b, convenio c 
+         WHERE a.cd_convenio_parametro = b.cd_convenio
+           AND b.cd_convenio = c.cd_convenio
+           AND a.cd_convenio_parametro IN (54,55)
+           AND NVL(a.nr_seq_protocolo,0) = 0
+           AND a.ie_cancelamento IS NULL
+           AND a.vl_conta > 0
+           AND a.ie_status_acerto = 1
+           AND TRUNC(a.dt_periodo_inicial) >= '01/10/2022'
+         GROUP BY uc_obter_data_entrega_conv(a.cd_convenio_parametro), a.nr_atendimento, a.nr_interno_conta
+         ORDER BY a.nr_interno_conta ASC)
+    WHERE qt_pend = 0
+    AND qt_aprov > 0
+    AND dt_entrega = TRUNC(SYSDATE);
+       
+BEGIN    
+    
+    OPEN C00; -- Lista todos os atendimentos que possuem contas pendentes no sistema
+        LOOP
+            FETCH C00 INTO	nr_atendimento_w, nr_interno_conta1_w, cd_convenio_w;
+            EXIT WHEN C00%NOTFOUND;
+            
+            IF nr_interno_conta1_w > 0 THEN
+        
+                SELECT COUNT(*)
+                  INTO qt_conta_w -- Verifica a quantidade de contas no atendimento
+                  FROM conta_paciente
+                 WHERE nr_atendimento = nr_atendimento_w
+                   AND cd_convenio_parametro = cd_convenio_w
+                   AND ie_cancelamento IS NULL
+                   AND vl_conta > 0
+                   AND NVL(nr_seq_protocolo,0) = 0;
+
+                IF qt_conta_w > 1 THEN
+                
+                    nr_interno_conta1_w := 0;
+                    nr_interno_conta2_w := 0;
+                
+                    SELECT nr_interno_conta, qt_pend, qt_aprov
+                      INTO nr_interno_conta1_w, qt_pend_conta1_w, qt_aprov_conta1_w
+                      FROM
+                            (SELECT a.nr_interno_conta, 
+                                   (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) NOT IN (12,35,45)) qt_pend,
+                                   (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) IN (12,35,45)) qt_aprov                                        
+                              FROM conta_paciente a
+                             WHERE a.cd_convenio_parametro = cd_convenio_w
+                               AND NVL(a.nr_seq_protocolo,0) = 0
+                               AND a.ie_cancelamento IS NULL
+                               AND a.vl_conta > 0
+                               AND a.nr_atendimento = nr_atendimento_w
+                             GROUP BY a.nr_interno_conta
+                             ORDER BY a.nr_interno_conta ASC) WHERE ROWNUM = 1;
+
+                    SELECT nr_interno_conta, qt_pend, qt_aprov
+                      INTO nr_interno_conta2_w, qt_pend_conta2_w, qt_aprov_conta2_w                    
+                      FROM
+                            (SELECT a.nr_interno_conta, 
+                                   (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) NOT IN (12,35,45)) qt_pend,
+                                   (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) IN (12,35,45)) qt_aprov                                        
+                              FROM conta_paciente a
+                             WHERE a.cd_convenio_parametro = cd_convenio_w
+                               AND NVL(a.nr_seq_protocolo,0) = 0
+                               AND a.ie_cancelamento IS NULL
+                               AND a.vl_conta > 0
+                               AND a.nr_atendimento = nr_atendimento_w
+                             GROUP BY a.nr_interno_conta
+                             ORDER BY a.nr_interno_conta DESC) WHERE ROWNUM = 1;
+                       
+                       CASE WHEN ((qt_pend_conta1_w > 0 AND qt_aprov_conta1_w > 0) AND (qt_pend_conta2_w > 0 AND qt_aprov_conta2_w > 0)) THEN ie_junta_conta_w := 'S';                       
+                            WHEN ((qt_pend_conta1_w = 0 AND qt_aprov_conta1_w > 0) AND (qt_pend_conta2_w = 0 AND qt_aprov_conta2_w > 0)) THEN ie_junta_conta_w := 'S';
+                            WHEN ((qt_pend_conta1_w > 0 AND qt_aprov_conta1_w = 0) AND (qt_pend_conta2_w > 0 AND qt_aprov_conta2_w = 0)) THEN ie_junta_conta_w := 'S';
+                            WHEN ((qt_pend_conta1_w = 0 AND qt_aprov_conta1_w > 0) AND (qt_pend_conta2_w > 0 AND qt_aprov_conta2_w > 0)) THEN ie_junta_conta_w := 'S';
+                            WHEN ((qt_pend_conta1_w > 0 AND qt_aprov_conta1_w > 0) AND (qt_pend_conta2_w > 0 AND qt_aprov_conta2_w = 0)) THEN ie_junta_conta_w := 'S';
+                            ELSE ie_junta_conta_w := 'N';
+                       END CASE;
+                       
+                       IF ie_junta_conta_w = 'S' THEN
+                       
+                           transferir_conta_paciente(nr_interno_conta2_w,nr_interno_conta1_w,nm_usuario_w);
+                           recalcular_conta_paciente(nr_interno_conta2_w,nm_usuario_w);
+                           qt_conta_w := 1;
+                           
+                       END IF;
+                 
+                END IF;
+                   
+                IF qt_conta_w = 1 THEN
+
+                    SELECT 'S'
+                      INTO ie_possui_w
+                      FROM DUAL 
+                     WHERE EXISTS( SELECT DISTINCT 1
+                                     FROM ( SELECT a.nr_prescricao,
+                                                   CASE WHEN nr_sequencia_prescricao IS NOT NULL THEN nr_sequencia_prescricao ELSE uc_lab_obter_seq_prescr(nr_prescricao,(select x.nr_seq_exame from regra_lanc_automatico x where x.nr_sequencia = a.nr_seq_regra_lanc)) END AS nr_sequencia_prescricao                   
+                                              FROM procedimento_paciente a, conta_paciente b
+                                             WHERE a.nr_interno_conta = b.nr_interno_conta
+                                               AND b.ie_status_acerto = 1
+                                               AND a.cd_convenio = cd_convenio_w
+                                               AND b.ie_cancelamento IS NULL
+                                               AND a.nr_interno_conta = nr_interno_conta1_w) 
+                                     WHERE obter_status_atend_seq_prescr(nr_prescricao, nr_sequencia_prescricao) NOT IN (12,35,45))
+                       AND EXISTS( SELECT DISTINCT 1
+                                     FROM ( SELECT a.nr_prescricao,
+                                                   CASE WHEN nr_sequencia_prescricao IS NOT NULL THEN nr_sequencia_prescricao ELSE uc_lab_obter_seq_prescr(nr_prescricao,(select x.nr_seq_exame from regra_lanc_automatico x where x.nr_sequencia = a.nr_seq_regra_lanc)) END AS nr_sequencia_prescricao                   
+                                              FROM procedimento_paciente a, conta_paciente b
+                                             WHERE a.nr_interno_conta = b.nr_interno_conta
+                                               AND b.ie_status_acerto = 1
+                                               AND a.cd_convenio = cd_convenio_w
+                                               AND b.ie_cancelamento IS NULL
+                                               AND a.nr_interno_conta = nr_interno_conta1_w) 
+                                     WHERE obter_status_atend_seq_prescr(nr_prescricao, nr_sequencia_prescricao) IN (12,35,45))
+                     UNION ALL
+                    SELECT 'N' FROM DUAL
+                     FETCH FIRST 1 ROW ONLY; 
+                          
+                    IF ie_possui_w = 'S' THEN       
+                                  
+                        duplicar_conta_paciente(nr_interno_conta1_w,nm_usuario_w);
+                    
+                        SELECT MAX(nr_interno_conta)
+                          INTO nr_interno_conta2_w
+                          FROM conta_paciente
+                         WHERE cd_convenio_parametro = cd_convenio_w
+                           AND nr_atendimento = nr_atendimento_w
+                           AND ie_cancelamento IS NULL
+                           AND vl_conta > 0
+                           AND NVL(nr_seq_protocolo,0) = 0;
+                     
+                        IF nr_interno_conta2_w <> nr_interno_conta1_w THEN
+                         
+                            DELETE FROM procedimento_paciente WHERE nr_interno_conta = nr_interno_conta2_w;
+                            COMMIT;
+                           
+                            OPEN C01;
+                                LOOP
+                                    FETCH C01 INTO	nr_sequencia_w;
+                                    EXIT WHEN C01%NOTFOUND;
+                                        
+                                    IF nr_sequencia_w > 0 THEN
+                                        sus_transfere_proc_conta(nr_interno_conta2_w,nr_sequencia_w);
+                                    END IF;
+                                END LOOP;
+                            CLOSE C01;           
+                        END IF;
+                        
+                    ELSIF ie_possui_w = 'N' THEN
+                    
+                        IF (nr_interno_conta1_w > 0 AND nr_atendimento_w > 0) THEN
+                                                        
+                            recalcular_conta_paciente(nr_interno_conta1_w,nm_usuario_w);
+                           
+                            SELECT qt_pend, qt_aprov
+                              INTO qt_pend_w, qt_aprov_w
+                              FROM
+                                    (SELECT a.nr_interno_conta, 
+                                           (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) NOT IN (12,35,45)) qt_pend,
+                                           (SELECT COUNT(*) FROM procedimento_paciente b WHERE b.nr_interno_conta = a.nr_interno_conta AND obter_status_atend_seq_prescr (b.nr_prescricao, CASE WHEN b.nr_sequencia_prescricao IS NOT NULL THEN b.nr_sequencia_prescricao ELSE (SELECT b.nr_seq_exame FROM regra_lanc_automatico c WHERE c.nr_sequencia = b.nr_seq_regra_lanc) END) IN (12,35,45)) qt_aprov                                        
+                                      FROM conta_paciente a
+                                     WHERE a.cd_convenio_parametro = cd_convenio_w
+                                       AND NVL(a.nr_seq_protocolo,0) = 0
+                                       AND a.ie_cancelamento IS NULL
+                                       AND a.vl_conta > 0
+                                       AND a.nr_interno_conta = nr_interno_conta1_w
+                                     GROUP BY a.nr_interno_conta);
+                               
+                            IF qt_conta_w > 0 AND qt_pend_w = 0 AND qt_aprov_w > 0 THEN
+                           
+                                fechar_conta_paciente(nr_interno_conta1_w,nr_atendimento_w,2,nm_usuario_w,ds_erro_w);
+                                
+                                SELECT ie_status_acerto
+                                  INTO ie_status_w
+                                  FROM conta_paciente
+                                 WHERE nr_interno_conta = nr_interno_conta1_w;
+                                   
+                                IF ie_status_w = 1 THEN
+
+                                   alterar_status_conta(nr_interno_conta1_w,2,nm_usuario_w);
+                                    
+                                END IF;
+                                 
+                                SELECT COUNT(*)
+                                  INTO qt_conta_pend_w
+                                  FROM conta_paciente
+                                 WHERE nr_atendimento = nr_atendimento_w
+                                   AND ie_status_acerto = 1
+                                   AND ie_cancelamento IS NULL
+                                   AND vl_conta > 0;
+                                   
+                                IF qt_conta_pend_w = 0 THEN
+                                
+                                    UPDATE atendimento_paciente SET ie_fim_conta = 'F', dt_fim_conta = SYSDATE, nm_usuario = nm_usuario_w WHERE nr_atendimento = nr_atendimento_w;
+                                    COMMIT;
+                                    
+                                END IF;    
+                         
+                            END IF;
+                        
+                        END IF;    
+                    
+                    END IF;
+                    
+                END IF; 
+            
+            END IF;
+            
+        END LOOP;
+        
+    CLOSE C00;
+    
+    OPEN C02;
+        LOOP
+        FETCH C02 INTO nr_atendimento_w, nr_interno_conta1_w, qt_pend_w, qt_aprov_w;
+        EXIT WHEN C02%NOTFOUND;
+            BEGIN
+            
+              IF qt_pend_w = 0 AND qt_aprov_w >0 THEN
+                
+                    fechar_conta_paciente(nr_interno_conta1_w,nr_atendimento_w,2,nm_usuario_w,ds_erro_w);
+                    
+                    SELECT ie_status_acerto
+                      INTO ie_status_w
+                      FROM conta_paciente
+                     WHERE nr_interno_conta = nr_interno_conta1_w;
+                       
+                    IF ie_status_w = 1 THEN
+
+                       alterar_status_conta(nr_interno_conta1_w,2,nm_usuario_w);
+                        
+                    END IF;
+                       
+                    SELECT COUNT(*)
+                      INTO qt_conta_pend_w
+                      FROM conta_paciente
+                     WHERE nr_atendimento = nr_atendimento_w
+                       AND ie_status_acerto = 1
+                       AND ie_cancelamento IS NULL
+                       AND vl_conta > 0;
+                       
+                    IF qt_conta_pend_w = 0 THEN
+                    
+                        UPDATE atendimento_paciente SET ie_fim_conta = 'F', dt_fim_conta = SYSDATE, nm_usuario = nm_usuario_w WHERE nr_atendimento = nr_atendimento_w;
+                        COMMIT;
+                        
+                    END IF;
+                    
+                END IF;    
+            END;
+        END LOOP;
+    CLOSE C02;
+
+ END; 
+ EXCEPTION
+	WHEN	OTHERS THEN
+		NULL;
+ 
+END;
+/
